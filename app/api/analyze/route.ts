@@ -36,11 +36,29 @@ async function fetchTweet(url:string):Promise<string>{
   return author?`${author}: ${text}`:text
 }
 
+const NOISE_PATTERNS=[
+  /sponsored stories[\s\S]*/i,
+  /more from [a-z\s]+\n[\s\S]*/i,
+  /related topics[\s\S]*/i,
+  /you may (also )?like[\s\S]*/i,
+  /recommended (articles|videos|stories)[\s\S]*/i,
+  /advertisement[\s\S]*/i,
+  /^(fox news media|fox business|fox nation|fox news audio|fox weather|outkick)[^\n]*\n/gim,
+  /\n(u\.s\.|politics|world|opinion|media|entertainment|lifestyle)\s*\n/gi,
+]
+
+function stripNoise(text:string):string{
+  let t=text
+  for(const p of NOISE_PATTERNS) t=t.replace(p,'')
+  return t.replace(/\n{3,}/g,'\n\n').trim()
+}
+
 async function fetchJina(url:string):Promise<string>{
-  const res=await timeout(fetch(`https://r.jina.ai/${url}`,{headers:{'Accept':'text/plain','X-Return-Format':'text'}}),15000)
+  const res=await timeout(fetch(`https://r.jina.ai/${url}`,{headers:{'Accept':'text/plain','X-Return-Format':'text','X-Remove-Selector':'nav,footer,aside,[class*="ad"],[class*="sponsor"],[class*="related"],[class*="recommend"]'}}),15000)
   if(!res.ok)throw new Error(`Could not fetch URL (${res.status})`)
   const raw=await res.text()
-  return raw.replace(/^(Title:|URL Source:|Published Time:|Markdown Content:)[^\n]*\n/gm,'').trim()
+  const stripped=raw.replace(/^(Title:|URL Source:|Published Time:|Markdown Content:)[^\n]*\n/gm,'').trim()
+  return stripNoise(stripped)
 }
 
 type ArticleMeta={title:string;description:string;image:string;domain:string}
