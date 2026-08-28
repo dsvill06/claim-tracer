@@ -1,10 +1,21 @@
 import { GoogleGenAI } from '@google/genai'
 import { NextRequest } from 'next/server'
 import { execSync } from 'child_process'
+import { writeFileSync } from 'fs'
 import { asClaims, failedClaim, judgePrompt, jsonLine, maxInput, mergeSources, normalizeJudge, parseJson, sanitizeText, scoreClaim, splitterPrompt, timeout, uniqueClaims, modelName, streamMime } from '@/lib/scoring'
 import { saveAnalysis } from '@/lib/supabase'
 export const runtime='nodejs'
 const COMPOSIO_CLI=process.env.COMPOSIO_CLI_PATH||`${process.env.HOME}/.local/bin/composio`
+
+// Bootstrap Vertex AI service account from env var (Vercel-compatible)
+if(process.env.GOOGLE_SERVICE_ACCOUNT_JSON&&!process.env.GOOGLE_APPLICATION_CREDENTIALS){
+  try{
+    const path='/tmp/sa-key.json'
+    writeFileSync(path,process.env.GOOGLE_SERVICE_ACCOUNT_JSON)
+    process.env.GOOGLE_APPLICATION_CREDENTIALS=path
+  }catch(e){console.error('[auth] failed to write service account key:',e)}
+}
+
 const ai=()=>process.env.GEMINI_API_KEY
   ?new GoogleGenAI({apiKey:process.env.GEMINI_API_KEY})
   :new GoogleGenAI({vertexai:true,project:process.env.GOOGLE_CLOUD_PROJECT||'midyear-precept-506914-a3',location:process.env.GOOGLE_CLOUD_LOCATION||'us-central1'})
