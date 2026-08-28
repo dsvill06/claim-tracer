@@ -1,25 +1,54 @@
 import { GoogleGenAI } from '@google/genai'
 import { NextRequest } from 'next/server'
+import { execSync } from 'child_process'
 import { asClaims, failedClaim, judgePrompt, jsonLine, maxInput, mergeSources, normalizeJudge, parseJson, sanitizeText, scoreClaim, splitterPrompt, timeout, uniqueClaims, modelName, streamMime } from '@/lib/scoring'
 import { saveAnalysis } from '@/lib/supabase'
 export const runtime='nodejs'
+const COMPOSIO_CLI=process.env.COMPOSIO_CLI_PATH||`${process.env.HOME}/.local/bin/composio`
 const ai=()=>process.env.GEMINI_API_KEY
   ?new GoogleGenAI({apiKey:process.env.GEMINI_API_KEY})
   :new GoogleGenAI({vertexai:true,project:process.env.GOOGLE_CLOUD_PROJECT||'midyear-precept-506914-a3',location:process.env.GOOGLE_CLOUD_LOCATION||'us-central1'})
 async function generate(contents:string,tools?:any[]){return ai().models.generateContent({model:modelName,contents,config:tools?{tools}:undefined})}
 const isUrl=(s:string)=>/^https?:\/\/.+/i.test(s.trim())
 
-async function fetchReddit(url:string):Promise<string>{
-  const jsonUrl=url.split('?')[0].replace(/\/?$/,'.json')
-  const res=await timeout(fetch(jsonUrl,{headers:{'User-Agent':'ClaimTracer/1.0 (analysis tool)'}}),12000)
-  if(!res.ok)throw new Error(`Reddit returned ${res.status}`)
-  const data=await res.json()
+const BLOCK_SIGNALS=['blocked by network security','log in to your reddit account','use your developer token','access denied','enable javascript','please verify you are a human']
+function isBlockPage(text:string){return BLOCK_SIGNALS.some(s=>text.toLowerCase().includes(s))}
+
+function parseRedditData(data:any):string{
   const post=data[0]?.data?.children?.[0]?.data
-  if(!post)throw new Error('Could not parse Reddit post.')
+  if(!post)return ''
   const parts=[post.title,post.selftext].filter(Boolean)
   const topComments:string[]=(data[1]?.data?.children||[]).slice(0,5).map((c:any)=>c.data?.body).filter(Boolean)
   if(topComments.length)parts.push('Top comments:\n'+topComments.join('\n'))
   return parts.join('\n\n')
+}
+
+async function fetchReddit(url:string):Promise<string>{
+  const u=url.trim()
+  // 1. Try Composio CLI proxy (authenticated Reddit OAuth — most reliable)
+  try{
+    const postId=u.match(/comments\/([a-z0-9]+)/i)?.[1]
+    if(postId){
+      const apiUrl=`https://oauth.reddit.com${new URL(u).pathname.replace(/\/?$/,'.json')}?limit=5&sort=top`
+      const raw=execSync(`${COMPOSIO_CLI} proxy '${apiUrl}' --toolkit reddit`,{timeout:15000,stdio:['pipe','pipe','pipe']})
+      const data=JSON.parse(raw.toString())
+      const text=parseRedditData(data)
+      if(text&&!isBlockPage(text)){console.log('[reddit] fetched via composio proxy');return text}
+    }
+  }catch(e){console.warn('[reddit] composio proxy failed:',e instanceof Error?e.message:'unknown')}
+
+  // 2. Try unauthenticated .json API
+  const jsonUrl=u.split('?')[0].replace(/\/?$/,'.json')
+  try{
+    const res=await timeout(fetch(jsonUrl,{headers:{'User-Agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36','Accept':'application/json'}}),10000)
+    if(res.ok){
+      const data=await res.json()
+      const text=parseRedditData(data)
+      if(text&&!isBlockPage(text)){console.log('[reddit] fetched via json api');return text}
+    }
+  }catch{}
+
+  throw new Error('Reddit is blocking automated access. Paste the post text directly instead.')
 }
 
 async function fetchTweet(url:string):Promise<string>{
@@ -36,21 +65,20 @@ async function fetchTweet(url:string):Promise<string>{
   return author?`${author}: ${text}`:text
 }
 
-const NOISE_PATTERNS=[
-  /sponsored stories[\s\S]*/i,
-  /more from [a-z\s]+\n[\s\S]*/i,
-  /related topics[\s\S]*/i,
-  /you may (also )?like[\s\S]*/i,
-  /recommended (articles|videos|stories)[\s\S]*/i,
-  /advertisement[\s\S]*/i,
-  /^(fox news media|fox business|fox nation|fox news audio|fox weather|outkick)[^\n]*\n/gim,
-  /\n(u\.s\.|politics|world|opinion|media|entertainment|lifestyle)\s*\n/gi,
+const NOISE_LINE_PATTERNS=[
+  /^sponsored stories\s*$/i,
+  /^more from [a-z\s]+\s*$/i,
+  /^related topics\s*$/i,
+  /^you may (also )?like\s*$/i,
+  /^recommended (articles|videos|stories)\s*$/i,
+  /^advertisement\s*$/i,
+  /^(fox news media|fox business|fox nation|fox news audio|fox weather|outkick)\s*$/i,
+  /^(u\.s\.|politics|world|opinion|media|entertainment|lifestyle)\s*$/i,
 ]
 
 function stripNoise(text:string):string{
-  let t=text
-  for(const p of NOISE_PATTERNS) t=t.replace(p,'')
-  return t.replace(/\n{3,}/g,'\n\n').trim()
+  const lines=text.split('\n').filter(line=>!NOISE_LINE_PATTERNS.some(p=>p.test(line.trim())))
+  return lines.join('\n').replace(/\n{3,}/g,'\n\n').trim()
 }
 
 async function fetchJina(url:string):Promise<string>{
@@ -58,7 +86,9 @@ async function fetchJina(url:string):Promise<string>{
   if(!res.ok)throw new Error(`Could not fetch URL (${res.status})`)
   const raw=await res.text()
   const stripped=raw.replace(/^(Title:|URL Source:|Published Time:|Markdown Content:)[^\n]*\n/gm,'').trim()
-  return stripNoise(stripped)
+  const clean=stripNoise(stripped)
+  if(isBlockPage(clean))throw new Error('This site is blocking automated access. Paste the content directly instead.')
+  return clean
 }
 
 type ArticleMeta={title:string;description:string;image:string;domain:string}
@@ -110,8 +140,17 @@ async function run(raw:string,c:ReadableStreamDefaultController,encoder:TextEnco
       catch(e){send({type:'error',message:`Could not read that URL. ${e instanceof Error?e.message:'Try pasting the text directly.'}`});c.close();return}
     }
     let parsed
-    try{parsed=parseJson((await generate(`${splitterPrompt}\n\nTEXT:\n${text}`)).text||'')}
-    catch{parsed=parseJson((await generate(`${splitterPrompt}\nReturn only the JSON object.\n\nTEXT:\n${text}`)).text||'')}
+    try{
+      parsed=parseJson((await timeout(generate(`${splitterPrompt}\n\nTEXT:\n${text}`),25000)).text||'')
+    }catch(e1){
+      console.error('[analyze] splitter attempt 1 failed:',e1)
+      try{
+        parsed=parseJson((await timeout(generate(`${splitterPrompt}\nReturn only the JSON object.\n\nTEXT:\n${text}`),20000)).text||'')
+      }catch(e2){
+        console.error('[analyze] splitter attempt 2 failed:',e2)
+        parsed={claims:[]}
+      }
+    }
     claims=uniqueClaims(asClaims(parsed))
     send({type:'claims',claims})
     if(!claims.length){const id=await saveAnalysis(raw,[],sourceUrl);send({type:'done',id,displayText:text,sourceUrl});c.close();return}
@@ -142,5 +181,5 @@ async function run(raw:string,c:ReadableStreamDefaultController,encoder:TextEnco
     }))
     try{const id=await saveAnalysis(raw,results,sourceUrl);send({type:'done',id,displayText:text,sourceUrl})}catch{send({type:'done',id:'',displayText:text,sourceUrl})}
     c.close()
-  }catch(e){send({type:'error',message:'The analysis could not be completed. Try again.'});c.close()}
+  }catch(e){console.error('[analyze] run() failed:',e);send({type:'error',message:'The analysis could not be completed. Try again.'});c.close()}
 }
