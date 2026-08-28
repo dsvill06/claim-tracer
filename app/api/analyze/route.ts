@@ -2,10 +2,13 @@ import { GoogleGenAI } from '@google/genai'
 import { NextRequest } from 'next/server'
 import { execSync } from 'child_process'
 import { writeFileSync } from 'fs'
+import { Composio } from 'composio-core'
 import { asClaims, failedClaim, judgePrompt, jsonLine, maxInput, mergeSources, normalizeJudge, parseJson, sanitizeText, scoreClaim, splitterPrompt, timeout, uniqueClaims, modelName, streamMime } from '@/lib/scoring'
 import { saveAnalysis } from '@/lib/supabase'
 export const runtime='nodejs'
 const COMPOSIO_CLI=process.env.COMPOSIO_CLI_PATH||`${process.env.HOME}/.local/bin/composio`
+const COMPOSIO_API_KEY=process.env.COMPOSIO_API_KEY||'uak_cP4rSzuxfm1Jc2-OgPdnNs7SU8wNL1L0gWbjVti9h5W'
+const COMPOSIO_REDDIT_ACCOUNT_ID='ca_KYZ6etuBuigh'
 
 // Bootstrap Vertex AI service account from env var (Vercel-compatible)
 if(process.env.GOOGLE_SERVICE_ACCOUNT_JSON&&!process.env.GOOGLE_APPLICATION_CREDENTIALS){
@@ -36,19 +39,52 @@ function parseRedditData(data:any):string{
 
 async function fetchReddit(url:string):Promise<string>{
   const u=url.trim()
-  // 1. Try Composio CLI proxy (authenticated Reddit OAuth — most reliable)
-  try{
-    const postId=u.match(/comments\/([a-z0-9]+)/i)?.[1]
-    if(postId){
-      const apiUrl=`https://oauth.reddit.com${new URL(u).pathname.replace(/\/?$/,'.json')}?limit=5&sort=top`
+  const postId=u.match(/comments\/([a-z0-9]+)/i)?.[1]
+  const apiPath=new URL(u).pathname.replace(/\/?$/,'.json')
+  const apiUrl=`https://oauth.reddit.com${apiPath}?limit=5&sort=top`
+
+  // 1. Try Composio HTTP proxy (works on Vercel — no CLI required)
+  if(postId){
+    try{
+      const client=new Composio({apiKey:COMPOSIO_API_KEY})
+      const resp=await client.actions.executeRequest({
+        connectedAccountId:COMPOSIO_REDDIT_ACCOUNT_ID,
+        endpoint:apiUrl,
+        method:'GET',
+        parameters:[],
+      })
+      if(resp.successful&&resp.data){
+        const data=resp.data['response_data']??resp.data
+        const text=parseRedditData(data)
+        if(text&&!isBlockPage(text)){console.log('[reddit] fetched via composio SDK proxy');return text}
+      }
+    }catch(e){console.warn('[reddit] composio SDK proxy failed:',e instanceof Error?e.message:'unknown')}
+  }
+
+  // 2. Try Composio CLI proxy (works locally when CLI is installed)
+  if(postId){
+    try{
       const raw=execSync(`${COMPOSIO_CLI} proxy '${apiUrl}' --toolkit reddit`,{timeout:15000,stdio:['pipe','pipe','pipe']})
       const data=JSON.parse(raw.toString())
       const text=parseRedditData(data)
-      if(text&&!isBlockPage(text)){console.log('[reddit] fetched via composio proxy');return text}
-    }
-  }catch(e){console.warn('[reddit] composio proxy failed:',e instanceof Error?e.message:'unknown')}
+      if(text&&!isBlockPage(text)){console.log('[reddit] fetched via composio CLI proxy');return text}
+    }catch(e){console.warn('[reddit] composio CLI proxy failed:',e instanceof Error?e.message:'unknown')}
+  }
 
-  // 2. Try unauthenticated .json API
+  // 3. Try direct Reddit OAuth using a bearer token from env (user-supplied)
+  const bearerToken=process.env.REDDIT_ACCESS_TOKEN
+  if(postId&&bearerToken){
+    try{
+      const res=await timeout(fetch(apiUrl,{headers:{'Authorization':`Bearer ${bearerToken}`,'User-Agent':'ClaimTracer/1.0'}}),10000)
+      if(res.ok){
+        const data=await res.json()
+        const text=parseRedditData(data)
+        if(text&&!isBlockPage(text)){console.log('[reddit] fetched via direct Reddit OAuth');return text}
+      }
+    }catch(e){console.warn('[reddit] direct Reddit OAuth failed:',e instanceof Error?e.message:'unknown')}
+  }
+
+  // 4. Try unauthenticated .json API
   const jsonUrl=u.split('?')[0].replace(/\/?$/,'.json')
   try{
     const res=await timeout(fetch(jsonUrl,{headers:{'User-Agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36','Accept':'application/json'}}),10000)
@@ -62,11 +98,7 @@ async function fetchReddit(url:string):Promise<string>{
   throw new Error('Reddit is blocking automated access. Paste the post text directly instead.')
 }
 
-async function fetchTweet(url:string):Promise<string>{
-  const oembedUrl=`https://publish.x.com/oembed?url=${encodeURIComponent(url)}&omit_script=true`
-  const res=await timeout(fetch(oembedUrl),10000)
-  if(!res.ok)throw new Error(`Twitter oEmbed returned ${res.status}`)
-  const data=await res.json()
+function parseOembedHtml(data:{author_name?:string;html?:string}):string{
   const author:string=data.author_name||''
   const html:string=data.html||''
   const text=html
@@ -74,6 +106,34 @@ async function fetchTweet(url:string):Promise<string>{
     .replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&mdash;/g,'—').replace(/&nbsp;/g,' ')
     .replace(/\s+/g,' ').trim()
   return author?`${author}: ${text}`:text
+}
+
+async function fetchTweet(url:string):Promise<string>{
+  // 1. Try oEmbed (primary — works without auth for most public tweets)
+  try{
+    const oembedUrl=`https://publish.x.com/oembed?url=${encodeURIComponent(url)}&omit_script=true`
+    const res=await timeout(fetch(oembedUrl),10000)
+    if(res.ok){
+      const data=await res.json()
+      const text=parseOembedHtml(data)
+      if(text&&text.length>=40){console.log('[twitter] fetched via oEmbed');return text}
+      console.warn('[twitter] oEmbed returned short/empty content, trying Jina fallback')
+    }else{
+      console.warn(`[twitter] oEmbed returned ${res.status}, trying Jina fallback`)
+    }
+  }catch(e){console.warn('[twitter] oEmbed failed:',e instanceof Error?e.message:'unknown')}
+
+  // 2. Fallback: Jina reader (works for many public Twitter/X URLs)
+  try{
+    const jinaRes=await timeout(fetch(`https://r.jina.ai/${url}`,{headers:{'Accept':'text/plain','X-Return-Format':'text'}}),15000)
+    if(jinaRes.ok){
+      const raw=await jinaRes.text()
+      const text=raw.replace(/^(Title:|URL Source:|Published Time:|Markdown Content:)[^\n]*\n/gm,'').trim()
+      if(text&&text.length>=40&&!isBlockPage(text)){console.log('[twitter] fetched via Jina fallback');return text}
+    }
+  }catch(e){console.warn('[twitter] Jina fallback failed:',e instanceof Error?e.message:'unknown')}
+
+  throw new Error('Could not fetch tweet content. Try pasting the tweet text directly.')
 }
 
 const NOISE_LINE_PATTERNS=[
