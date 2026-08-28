@@ -43,14 +43,36 @@ async function fetchJina(url:string):Promise<string>{
   return raw.replace(/^(Title:|URL Source:|Published Time:|Markdown Content:)[^\n]*\n/gm,'').trim()
 }
 
-async function fetchUrl(url:string):Promise<{text:string;sourceUrl:string}>{
+type ArticleMeta={title:string;description:string;image:string;domain:string}
+async function fetchOgMeta(url:string):Promise<ArticleMeta>{
+  try{
+    const res=await timeout(fetch(url,{headers:{'User-Agent':'ClaimTracer/1.0'}}),8000)
+    if(!res.ok)return{title:'',description:'',image:'',domain:new URL(url).hostname}
+    const html=await res.text()
+    const tag=(prop:string)=>{
+      const m=html.match(new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]+content=["']([^"']+)["']`,'i'))
+        ||html.match(new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${prop}["']`,'i'))
+      return m?.[1]||''
+    }
+    const title=tag('og:title')||tag('twitter:title')||(html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]||'')
+    return{
+      title:title.trim(),
+      description:(tag('og:description')||tag('twitter:description')||tag('description')).trim(),
+      image:tag('og:image')||tag('twitter:image'),
+      domain:new URL(url).hostname,
+    }
+  }catch{return{title:'',description:'',image:'',domain:''}}
+}
+
+async function fetchUrl(url:string):Promise<{text:string;sourceUrl:string;meta:ArticleMeta}>{
   const u=url.trim()
   let text:string
   if(/reddit\.com\/r\//i.test(u))text=await fetchReddit(u)
   else if(/^https?:\/\/(www\.)?(twitter\.com|x\.com)\//i.test(u))text=await fetchTweet(u)
   else text=await fetchJina(u)
   if(!text||text.length<40)throw new Error('Page had no readable content.')
-  return{text:text.slice(0,maxInput),sourceUrl:u}
+  const meta=await fetchOgMeta(u)
+  return{text:text.slice(0,maxInput),sourceUrl:u,meta}
 }
 export async function POST(req:NextRequest){let body:unknown;try{body=await req.json()}catch{return new Response(JSON.stringify({message:'Invalid request.'}),{status:400})}
   const raw=sanitizeText(typeof (body as any)?.text==='string'?(body as any).text:'')
@@ -66,7 +88,7 @@ async function run(raw:string,c:ReadableStreamDefaultController,encoder:TextEnco
     let text=raw, sourceUrl:string|undefined
     if(isUrl(raw)){
       send({type:'fetching',url:raw})
-      try{const fetched=await fetchUrl(raw);text=fetched.text;sourceUrl=fetched.sourceUrl}
+      try{const fetched=await fetchUrl(raw);text=fetched.text;sourceUrl=fetched.sourceUrl;send({type:'article-meta',...fetched.meta})}
       catch(e){send({type:'error',message:`Could not read that URL. ${e instanceof Error?e.message:'Try pasting the text directly.'}`});c.close();return}
     }
     let parsed
@@ -74,7 +96,7 @@ async function run(raw:string,c:ReadableStreamDefaultController,encoder:TextEnco
     catch{parsed=parseJson((await generate(`${splitterPrompt}\nReturn only the JSON object.\n\nTEXT:\n${text}`)).text||'')}
     claims=uniqueClaims(asClaims(parsed))
     send({type:'claims',claims})
-    if(!claims.length){const id=await saveAnalysis(raw,[],sourceUrl);send({type:'done',id});c.close();return}
+    if(!claims.length){const id=await saveAnalysis(raw,[],sourceUrl);send({type:'done',id,displayText:text,sourceUrl});c.close();return}
     const results=await Promise.all(claims.map(async(claim,index)=>{
       try{
         const response=await timeout(generate(judgePrompt(claim),[{googleSearch:{}}]),30000)
@@ -90,7 +112,7 @@ async function run(raw:string,c:ReadableStreamDefaultController,encoder:TextEnco
         return result
       }
     }))
-    try{const id=await saveAnalysis(raw,results,sourceUrl);send({type:'done',id})}catch{send({type:'done',id:''})}
+    try{const id=await saveAnalysis(raw,results,sourceUrl);send({type:'done',id,displayText:text,sourceUrl})}catch{send({type:'done',id:'',displayText:text,sourceUrl})}
     c.close()
   }catch(e){send({type:'error',message:'The analysis could not be completed. Try again.'});c.close()}
 }
