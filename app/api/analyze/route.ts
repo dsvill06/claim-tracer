@@ -116,17 +116,27 @@ async function run(raw:string,c:ReadableStreamDefaultController,encoder:TextEnco
     send({type:'claims',claims})
     if(!claims.length){const id=await saveAnalysis(raw,[],sourceUrl);send({type:'done',id,displayText:text,sourceUrl});c.close();return}
     const results=await Promise.all(claims.map(async(claim,index)=>{
-      try{
-        const response=await timeout(generate(judgePrompt(claim),[{googleSearch:{}}]),30000)
+      async function attemptJudge(prompt:string,ms:number){
+        const response=await timeout(generate(prompt,[{googleSearch:{}}]),ms)
         const judge=mergeSources(normalizeJudge(parseJson(response.text||'{}')),response.candidates?.[0]?.groundingMetadata)
-        const result=scoreClaim(claim,judge)
+        return scoreClaim(claim,judge)
+      }
+      try{
+        // First attempt: full claim
+        let result:ReturnType<typeof scoreClaim>
+        try{
+          result=await attemptJudge(judgePrompt(claim),30000)
+        }catch{
+          // Retry with a shortened key phrase (first 120 chars) and looser timeout
+          const shortClaim=claim.slice(0,120).replace(/,.*$/,'').trim()
+          result=await attemptJudge(judgePrompt(shortClaim),25000)
+        }
         send({type:'verdict',index,result})
         return result
       }catch(e){
-        console.error(`[analyze] claim ${index} failed:`,e)
+        console.error(`[analyze] claim ${index} failed after retry:`,e)
         const result=failedClaim(claim)
         send({type:'verdict',index,result})
-        send({type:'error',index,message:'Search failed for this claim.'})
         return result
       }
     }))
