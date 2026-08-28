@@ -1,47 +1,9 @@
-export default function Page() {
-  return (
-    <main
-      style={{
-        colorScheme: 'light dark',
-        position: 'relative',
-        display: 'flex',
-        minHeight: '100vh',
-        alignItems: 'center',
-        justifyContent: 'center',
-        backgroundColor: 'light-dark(#fff, #000)',
-        color: 'light-dark(#000, #fff)',
-      }}
-    >
-      <svg
-        aria-hidden="true"
-        style={{ width: 80, height: 80 }}
-        width={80}
-        height={80}
-        fill="none"
-        viewBox="0 0 20 20"
-        xmlns="http://www.w3.org/2000/svg"
-        stroke="currentColor"
-        strokeWidth="0.5"
-      >
-        <path
-          d="M14.2 14.2H17V6.9375C17 4.76288 15.2371 3 13.0625 3H5.8V5.8M14.2 14.2V7.79063L7.79062 14.2H14.2ZM14.2 14.2V17H6.9375C4.76288 17 3 15.2371 3 13.0625V5.8H5.8M5.8 5.8V12.2313L12.2313 5.8H5.8Z"
-          strokeLinejoin="round"
-        />
-      </svg>
-      <p
-        style={{
-          position: 'absolute',
-          left: '50%',
-          top: 'calc(50% + 56px)',
-          transform: 'translateX(-50%)',
-          whiteSpace: 'nowrap',
-          fontSize: '14px',
-          fontWeight: 500,
-          color: 'light-dark(#71717a, #a1a1aa)',
-        }}
-      >
-        Your v0 generation will show here.
-      </p>
-    </main>
-  )
-}
+'use client'
+import {useReducer,useState} from 'react'
+import {Results} from '@/components/results'
+import {ClaimResult,EXAMPLE,emptyMessage,inputPlaceholder,thesis} from '@/lib/scoring'
+type State={claims:ClaimResult[];pending:boolean;done:boolean;id?:string;error?:string;empty:boolean}
+const initial:State={claims:[],pending:false,done:false,empty:false}
+function reducer(s:State,a:any):State{if(a.type==='start')return {...initial,pending:true};if(a.type==='claims')return {...s,claims:a.claims.map((claim:string)=>({claim,score:0,band:'unsupported',factors:{sourceQuality:0,corroboration:0,directness:0,recency:0,contradictionPenalty:0},sources:[],notes:'Searching live sources…'})),empty:a.claims.length===0};if(a.type==='verdict'){const claims=[...s.claims];claims[a.index]=a.result;return {...s,claims};}if(a.type==='done')return {...s,pending:false,done:true,id:a.id};if(a.type==='error')return {...s,pending:false,error:a.message};return s}
+export default function Page(){const [text,setText]=useState('');const [state,dispatch]=useReducer(reducer,initial);async function trace(value=text){if(!value.trim())return;dispatch({type:'start'});try{const res=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:value})});if(!res.ok)throw new Error('Enter some text to trace.');const reader=res.body?.getReader();if(!reader)throw new Error('No stream returned.');const decoder=new TextDecoder();let buffer='';while(true){const {done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});const lines=buffer.split('\n');buffer=lines.pop()||'';for(const line of lines)if(line.trim())dispatch({type:JSON.parse(line).type,...JSON.parse(line)})}}catch(e){dispatch({type:'error',message:e instanceof Error?e.message:'Something went wrong.'})}}
+return <main className="site-shell"><header className="topbar"><a className="brand" href="/">Claim Tracer <span>CT</span></a><span className="version">{state.pending?'Searching live sources':'An honest evidence instrument'}</span></header><section className="hero"><p className="eyebrow">TRACE / SOURCE / SCORE</p><h1>Every viral post makes claims.<br/><em>We trace where they come from.</em></h1><p className="intro">Paste a post below. Claim Tracer breaks it into checkable pieces, searches live sources, and shows how well-sourced each one is.</p><div className="input-panel"><label htmlFor="post">Post text</label><textarea id="post" value={text} disabled={state.pending} onChange={e=>setText(e.target.value)} placeholder={inputPlaceholder} maxLength={12000}/><div className="input-footer"><span>{text.length.toLocaleString()} / 12,000</span><div><button className="link-button" disabled={state.pending} onClick={()=>setText(EXAMPLE)}>Try an example</button><button className="primary-button" disabled={state.pending||!text.trim()} onClick={()=>trace()}>{state.pending?'Tracing…':'Trace claims'}</button></div></div></div></section>{state.error&&<div className="error-note">{state.error} <button onClick={()=>trace(text)}>Try again</button></div>}{state.empty&&!state.pending?<div className="empty-state">{emptyMessage}</div>:state.claims.length>0&&<Results claims={state.claims} done={state.done} id={state.id} onRetry={i=>trace(state.claims[i].claim)}/>}<section className="how"><p className="eyebrow">THE METHOD</p><div>{[['01','Split','Atomic claims, not vibes.'],['02','Search','Independent origins, live.'],['03','Score','Sourcing, not truth.']].map(x=><article key={x[0]}><span>{x[0]}</span><h2>{x[1]}</h2><p>{x[2]}</p></article>)}</div></section><footer><p>Claim Tracer measures evidence, not certainty.</p></footer></main>}

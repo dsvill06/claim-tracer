@@ -1,49 +1,10 @@
-import { Analytics } from '@vercel/analytics/next'
-import type { Metadata, Viewport } from 'next'
+import {Analytics} from '@vercel/analytics/next'
+import {Fraunces,Inter,IBM_Plex_Mono} from 'next/font/google'
+import type {Metadata,Viewport} from 'next'
 import './globals.css'
-
-export const metadata: Metadata = {
-  title: 'v0 App',
-  description: 'Created with v0',
-  generator: 'v0.app',
-  icons: {
-    icon: [
-      {
-        url: '/icon-light-32x32.png',
-        media: '(prefers-color-scheme: light)',
-      },
-      {
-        url: '/icon-dark-32x32.png',
-        media: '(prefers-color-scheme: dark)',
-      },
-      {
-        url: '/icon.svg',
-        type: 'image/svg+xml',
-      },
-    ],
-    apple: '/apple-icon.png',
-  },
-}
-
-export const viewport: Viewport = {
-  colorScheme: 'light dark',
-  themeColor: [
-    { media: '(prefers-color-scheme: light)', color: 'white' },
-    { media: '(prefers-color-scheme: dark)', color: 'black' },
-  ],
-}
-
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode
-}>) {
-  return (
-    <html lang="en">
-      <body className="antialiased">
-        {children}
-        {process.env.NODE_ENV === 'production' && <Analytics />}
-      </body>
-    </html>
-  )
-}
+const fraunces=Fraunces({subsets:['latin'],variable:'--font-fraunces'})
+const inter=Inter({subsets:['latin'],variable:'--font-inter'})
+const plex=IBM_Plex_Mono({subsets:['latin'],weight:['400','600'],variable:'--font-plex'})
+export const metadata:Metadata={title:'Claim Tracer — Trace where claims come from',description:'An honest instrument for tracing the sources behind viral claims.',generator:'v0.app'}
+export const viewport:Viewport={colorScheme:'light',themeColor:'#f7f8f6',userScalable:false}
+export default function RootLayout({children}:{children:React.ReactNode}){return <html lang="en" className={`${fraunces.variable} ${inter.variable} ${plex.variable}`}><body>{children}{process.env.NODE_ENV==='production'&&<Analytics/>}</body></html>}

@@ -1,0 +1,4 @@
+import {ClaimResult, LIMITATION, summarize} from '@/lib/scoring'
+import {ClaimCard} from './claim-card'
+export function Limitation(){return <aside className="limitation"><strong>What this measures.</strong> {LIMITATION.replace('What this measures. ','')}</aside>}
+export function Results({claims,onRetry,done,id}:{claims:ClaimResult[];onRetry?:(i:number)=>void;done?:boolean;id?:string}){return <section className="results" aria-live="polite"><div className="summary"><strong>{summarize(claims)}</strong>{done&&id&&<button className="outline-button" onClick={()=>navigator.clipboard?.writeText(`${location.origin}/r/${id}`)}>Copy shareable link</button>}</div><div className="claim-list">{claims.map((claim,i)=><ClaimCard key={`${claim.claim}-${i}`} claim={claim} onRetry={()=>onRetry?.(i)}/>)}</div><Limitation/></section>}
